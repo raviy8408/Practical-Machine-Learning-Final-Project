@@ -1,0 +1,188 @@
+---
+title: "Pactical Machine Learning Project Report"
+author: "Ravi Kumar Yadav"
+output:
+  html_document: default
+  word_document: default
+---
+
+## Executive Summary
+This document is the final report of the Peer Assessment project from Coursera course Practical Machine Learning, as part of the Specialization in Data Science. 
+Given both training and test data from the following study:
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+The goal of this project is to “predict the manner in which they did the exercise.”
+This report would describes:
+
+“how model is build”
+“how cross validation is performed for model evaluation”
+“what is the expected out of sample error”
+“Reasons for the choices made”
+
+Ultimately “classe” variable needs to be successfully predicted using machine learning algorithms. The machine learning algorithm described here is applied to the 20 test cases available in the test data and the predictions are submitted in appropriate format to the Course Project Prediction Quiz for automated grading.
+
+First load the required packages and set the seed for reproducibility:
+```{r, results= 'hide'}
+library(lubridate)
+library(caret)
+library(ade4)
+library(utiml)
+library(nnet)
+library(e1071)
+set.seed(12345)
+```
+
+## Data Loading and Cleaning 
+Data is loaded from local machine. Next data cleaning is perfromed; all the blank and '#DIV/0' were converted to NAs for both test and train data.  
+```{r, results='hide'}
+train <- read.csv("pml-training.csv",stringsAsFactors = F)
+test <- read.csv("pml-testing.csv",stringsAsFactors = F)
+
+for(x in 1:length(train)){
+  train[train[,x] %in% c('','#DIV/0'),x] <- NA
+}
+
+for(x in 1:length(test)){
+  test[test[,x] %in% c('','#DIV/0'),x] <- NA
+}
+```
+
+Next step is dealing with NAs, Looking into the data I foud out that there are colums with either complete NAs or no NAs. So chose to remove NAs colume wise using a simple function:
+
+```{r, results='hide'}
+remove_cols <- function(x,n = 0.5){
+  miss_col <- c()
+  for(i in 1:ncol(x)) {
+    if(length(which(is.na(x[,i]))) > n*nrow(x)) miss_col <- append(miss_col,i) 
+  }
+  x <- x[,- miss_col]
+  
+  return(x)
+}
+train <- remove_cols(train,n = 0.3)
+test <- remove_cols(test,n = 0.3)
+```
+
+Now little bit knowhow about the data made me remove the timestamp column. And ofcourse index column needs to be removed.
+
+```{r, results='hide'}
+train$cvtd_timestamp <- test$cvtd_timestamp <- NULL
+train$X <- test$X <- NULL
+```
+
+Created factor and numeric colums:
+
+```{r, results='hide'}
+train_char_index <- sapply(train,is.character)
+test_char_index <- sapply(test,is.character)
+
+train[train_char_index] <- lapply(train[train_char_index],factor)
+test[train_char_index] <- lapply(test[train_char_index],factor)
+```
+
+Now we have the data ready in right fromat. Now lets remove any highly corelated variable for better accuracy. Numeric variables were also tested for zero variance, however no such variable were found.
+
+```{r, results='hide'}
+train_num_index <- sapply(train,is.numeric)
+train_fac_index <- sapply(train,is.factor)
+train_num <- train[train_num_index]
+train_fac <- train[train_fac_index]
+df <- cor(train_num)
+hc <- findCorrelation(df, cutoff=0.9) # putt any value as a "cutoff" 
+hc <- sort(hc)
+train_num <- train_num[,-c(hc)]
+```
+
+After cleaning the train data, ensured that test data also contains the same variable as train data:
+
+```{r, results= 'hide'}
+train <- as.data.frame(cbind(data.frame(train_num),data.frame(train_fac)))
+test <- test[,colnames(test) %in% colnames(train)]
+test <- test[,c(colnames(train[,-length(train)]))]
+```
+
+## Model Building
+First of all splitted the train data into testing and training data in 80:20 ratiO.
+Based on my previous experince with multiclass classification problem, I chose to use use Binary relevance algorithm. For BR algorithm data needs to be converted into mldr format. 
+
+Model performance is evaluated with confusion matrix; showing above 99% accuracy. The result is very good however to gain more confidance into the model cross validation is performed as a next step.
+
+```{r}
+intrain <- createDataPartition(train$classe,p = 0.8,list = FALSE)
+training <- train[intrain,]
+testing <- train[-intrain,]
+
+indx_f <- sapply(training, is.factor)
+indx_n <- sapply(training, is.numeric)
+indx_c <- sapply(training, is.character)
+testd <- acm.disjonctif(training[indx_f]) # converts factor variables into dummy binary variables
+training <- cbind(training[indx_c],training[indx_n],testd)
+
+indx_f <- sapply(testing, is.factor)
+indx_n <- sapply(testing, is.numeric)
+indx_c <- sapply(testing, is.character)
+testd <- acm.disjonctif(testing[indx_f]) # converts factor variables into dummy binary variables
+testing <- cbind(testing[indx_c],testing[indx_n],testd)
+
+mymldr <- mldr_from_dataframe(training, labelIndices = c((length(training)-4):length(training)), name = "trainMLDR")
+mymldr_test <- mldr_from_dataframe(testing, labelIndices = c((length(testing)-4):length(testing)), name = "testMLDR")
+
+model <- br(mymldr, "RF", seed = 123)
+
+pred <- as.data.frame(as.probability(predict(model, mymldr_test)))
+
+actual <- testing[,(length(testing)-4):length(testing)]
+testing$actual <- factor(apply(actual, 1, function(x) which.is.max(x)), labels = colnames(actual))
+testing$prediction <- factor(apply(pred, 1, function(x) which.is.max(x)), labels = colnames(pred))
+
+xtab <- table(testing$actual,testing$prediction)
+confusionMatrix(xtab)
+
+cnfm <- multilabel_confusion_matrix(mymldr_test,predict(model, mymldr_test))
+print(cnfm)
+```
+
+## Model evaluation with Cross Validation 
+
+```{r}
+  folds <- create_kfold_partition(mymldr, k = 10)
+  for (i in 1:10) {
+    dataset <- partition_fold(folds, i)
+    training <- dataset$train
+    testing <- dataset$test
+    model_split <- br(training, 'RF')
+    pred_split <- predict(model_split, testing)
+    cnfm_split <- multilabel_confusion_matrix(testing,pred_split)
+    if(i == 1){
+      cnfm_kfold <- cnfm_split
+    }
+    else{
+      cnfm_kfold <- "+"(cnfm_kfold,cnfm_split)
+    }
+  }
+print(cnfm_kfold)
+```
+Cross validation result again showed more than 99% accuracy(summation of %true positives for all classes). So now we can belive more on the model.
+
+## Prediction on given test sample
+With the build model prediction is made and result is reported:
+```{r}
+indx_f <- sapply(test, is.factor)
+indx_n <- sapply(test, is.numeric)
+indx_c <- sapply(test, is.character)
+testd <- acm.disjonctif(test[indx_f])
+test <- cbind(test[indx_c],test[indx_n],testd)
+test$new_window.yes <- 0
+
+pred_test <- as.data.frame(as.probability(predict(model, test)))
+
+test$prediction <- factor(apply(pred_test, 1, function(x) which.is.max(x)), labels = colnames(pred_test))
+
+test$prediction <- gsub("classe.","",test$prediction)
+test$prediction <- as.factor(test$prediction)
+
+test$prediction
+```
+
+
